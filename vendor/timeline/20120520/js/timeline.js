@@ -114,7 +114,7 @@ if (typeof VMM == 'undefined') {
 	
 	/* Debug
 	================================================== */
-	VMM.debug = true;
+	VMM.debug = false;
 	
 	/* Master Config
 	================================================== */
