@@ -19,7 +19,11 @@ Author URI:         http://www.mintcanary.com/
    General Styles
 --------------------------------------------------- */
 
-@import url(http://fonts.googleapis.com/css?family=Open+Sans:400,400italic,700);
+@font-face {
+  font-family: 'Open Sans';
+  font-style: normal;
+  src: url('OpenSans.ttf');
+}
 
 h1, h2, h3, h4, h5, h6 {
 	font-family:'Open Sans', Helvetica, Arial, sans-serif;
