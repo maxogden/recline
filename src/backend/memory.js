@@ -35,133 +35,163 @@ this.recline.Backend.Memory = this.recline.Backend.Memory || {};
   // @param fields (optional) list of field hashes (each hash defining a field
   // as per recline.Model.Field). If fields not specified they will be taken
   // from the data.
+
   my.Store = function(data, fields) {
-    var self = this;
-    this.data = data;
+    var self = this
+    this.data = data
+    pizza = this
+
+    // xf is shorthand for crossfilter
+    this.xf = new crossfilter(data)
+    this.filters = {}
+    
     if (fields) {
-      this.fields = fields;
+      this.fields = fields
     } else {
       if (data) {
         this.fields = _.map(data[0], function(value, key) {
-          return {id: key};
-        });
+          return {id: key}
+        })
       }
     }
+  }
+  
+  // idempotent
+  my.Store.prototype._makeFilter = function(field, sortObj) {
+    var sort = "desc"
+    if (sortObj) sort = sortObj[field].order
+    var filters = this.filters
+    if (!filters[field]) filters[field] = {}
+    if (filters[field][sort]) return filters[field][sort]
+    var dimension = function(r) { return r[field] }
+    if (sort == 'asc') dimension = function(r) { return -1 * r[field] }
+    filters[field][sort] = this.xf.dimension(dimension)
+    return filters[field][sort]
+  }
 
-    this.update = function(doc) {
-      _.each(self.data, function(internalDoc, idx) {
-        if(doc.id === internalDoc.id) {
-          self.data[idx] = doc;
+  my.Store.prototype.update = function(doc) {
+    var self = this;
+    _.each(self.data, function(internalDoc, idx) {
+      if(doc.id === internalDoc.id) {
+        self.data[idx] = doc;
+      }
+    });
+    this.xf = new crossfilter(self.data)
+  };
+
+  my.Store.prototype.delete = function(doc) {
+    var self = this;
+    var newdocs = _.reject(self.data, function(internalDoc) {
+      return (doc.id === internalDoc.id);
+    });
+    this.data = newdocs;
+    this.xf = new crossfilter(self.data)
+  };
+
+  my.Store.prototype.query = function(queryObj) {
+    var start = queryObj.from || 0
+    if (queryObj.filters.length > 0) {
+      var results = this._applyFilters(queryObj)
+    } else {
+      var filter = this._makeFilter(this.fields[0].id)
+      var results = filter.top(this._rowCount(queryObj))
+    }
+    
+    results = this._applyFreeTextQuery(results, queryObj)
+    var total = results.length
+    var facets = this.computeFacets(results, queryObj)
+    return {
+      total: total,
+      records: results,
+      facets: {}
+    }
+  }
+  
+  my.Store.prototype._rowCount = function(queryObj) {
+    return queryObj.size || this.data.length;
+  }
+  
+  // in place filtering
+  my.Store.prototype._applyFilters = function(queryObj) {
+    var self = this
+    var rows = []
+    _.each(queryObj.filters, function(filter) {
+      var fieldId = _.keys(filter.term)[0]
+      if (queryObj.sort && queryObj.sort.length > 0) {
+        var sortObj = _.first(queryObj.sort)
+        var filter = self._makeFilter(fieldId, sortObj)
+      } else {
+        var filter = self._makeFilter(fieldId)
+      }
+      rows.concat(filter.top(self._rowCount(queryObj)))
+    })
+    return rows
+  }
+
+  // we OR across fields but AND across terms in query string
+  my.Store.prototype._applyFreeTextQuery = function(results, queryObj) {
+    var self = this;
+    if (queryObj.q) {
+      var terms = queryObj.q.split(' ');
+      results = _.filter(results, function(rawdoc) {
+        var matches = true;
+        _.each(terms, function(term) {
+          var foundmatch = false;
+          _.each(self.fields, function(field) {
+            var value = rawdoc[field.id];
+            if (value !== null) { value = value.toString(); }
+            // TODO regexes?
+            foundmatch = foundmatch || (value === term);
+            // TODO: early out (once we are true should break to spare unnecessary testing)
+            // if (foundmatch) return true;
+          });
+          matches = matches && foundmatch;
+          // TODO: early out (once false should break to spare unnecessary testing)
+          // if (!matches) return false;
+        });
+        return matches;
+      });
+    }
+    return results;
+  };
+
+  my.Store.prototype.computeFacets = function(records, queryObj) {
+    var facetResults = {};
+    if (!queryObj.facets) {
+      return facetResults;
+    }
+    _.each(queryObj.facets, function(query, facetId) {
+      // TODO: remove dependency on recline.Model
+      facetResults[facetId] = new recline.Model.Facet({id: facetId}).toJSON();
+      facetResults[facetId].termsall = {};
+    });
+    // faceting
+    _.each(records, function(doc) {
+      _.each(queryObj.facets, function(query, facetId) {
+        var fieldId = query.terms.field;
+        var val = doc[fieldId];
+        var tmp = facetResults[facetId];
+        if (val) {
+          tmp.termsall[val] = tmp.termsall[val] ? tmp.termsall[val] + 1 : 1;
+        } else {
+          tmp.missing = tmp.missing + 1;
         }
       });
-    };
-
-    this.delete = function(doc) {
-      var newdocs = _.reject(self.data, function(internalDoc) {
-        return (doc.id === internalDoc.id);
+    });
+    _.each(queryObj.facets, function(query, facetId) {
+      var tmp = facetResults[facetId];
+      var terms = _.map(tmp.termsall, function(count, term) {
+        return { term: term, count: count };
       });
-      this.data = newdocs;
-    };
-
-    this.query = function(queryObj) {
-      var numRows = queryObj.size || this.data.length;
-      var start = queryObj.from || 0;
-      var results = this.data;
-      results = this._applyFilters(results, queryObj);
-      results = this._applyFreeTextQuery(results, queryObj);
-      // not complete sorting!
-      _.each(queryObj.sort, function(sortObj) {
-        var fieldName = _.keys(sortObj)[0];
-        results = _.sortBy(results, function(doc) {
-          var _out = doc[fieldName];
-          return (sortObj[fieldName].order == 'asc') ? _out : -1*_out;
-        });
+      tmp.terms = _.sortBy(terms, function(item) {
+        // want descending order
+        return -item.count;
       });
-      var total = results.length;
-      var facets = this.computeFacets(results, queryObj);
-      results = results.slice(start, start+numRows);
-      return {
-        total: total,
-        records: results,
-        facets: facets
-      };
-    };
-
-    // in place filtering
-    this._applyFilters = function(results, queryObj) {
-      _.each(queryObj.filters, function(filter) {
-        results = _.filter(results, function(doc) {
-          var fieldId = _.keys(filter.term)[0];
-          return (doc[fieldId] == filter.term[fieldId]);
-        });
-      });
-      return results;
-    };
-
-    // we OR across fields but AND across terms in query string
-    this._applyFreeTextQuery = function(results, queryObj) {
-      if (queryObj.q) {
-        var terms = queryObj.q.split(' ');
-        results = _.filter(results, function(rawdoc) {
-          var matches = true;
-          _.each(terms, function(term) {
-            var foundmatch = false;
-            _.each(self.fields, function(field) {
-              var value = rawdoc[field.id];
-              if (value !== null) { value = value.toString(); }
-              // TODO regexes?
-              foundmatch = foundmatch || (value === term);
-              // TODO: early out (once we are true should break to spare unnecessary testing)
-              // if (foundmatch) return true;
-            });
-            matches = matches && foundmatch;
-            // TODO: early out (once false should break to spare unnecessary testing)
-            // if (!matches) return false;
-          });
-          return matches;
-        });
-      }
-      return results;
-    };
-
-    this.computeFacets = function(records, queryObj) {
-      var facetResults = {};
-      if (!queryObj.facets) {
-        return facetResults;
-      }
-      _.each(queryObj.facets, function(query, facetId) {
-        // TODO: remove dependency on recline.Model
-        facetResults[facetId] = new recline.Model.Facet({id: facetId}).toJSON();
-        facetResults[facetId].termsall = {};
-      });
-      // faceting
-      _.each(records, function(doc) {
-        _.each(queryObj.facets, function(query, facetId) {
-          var fieldId = query.terms.field;
-          var val = doc[fieldId];
-          var tmp = facetResults[facetId];
-          if (val) {
-            tmp.termsall[val] = tmp.termsall[val] ? tmp.termsall[val] + 1 : 1;
-          } else {
-            tmp.missing = tmp.missing + 1;
-          }
-        });
-      });
-      _.each(queryObj.facets, function(query, facetId) {
-        var tmp = facetResults[facetId];
-        var terms = _.map(tmp.termsall, function(count, term) {
-          return { term: term, count: count };
-        });
-        tmp.terms = _.sortBy(terms, function(item) {
-          // want descending order
-          return -item.count;
-        });
-        tmp.terms = tmp.terms.slice(0, 10);
-      });
-      return facetResults;
-    };
+      tmp.terms = tmp.terms.slice(0, 10);
+    });
+    return facetResults;
   };
-  
+
 
   // ## Backbone
   //
